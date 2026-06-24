@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 from collections.abc import Iterable
 from itertools import islice
 
@@ -483,6 +484,22 @@ class Cohere2MoeModel(nn.Module):
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+
+            # HF Cohere2Moe nests the router projection under `.linear`
+            # (`mlp.gate.linear.*`); vLLM uses a flat ReplicatedLinear named
+            # `gate`, so drop the `.linear` segment.
+            if "mlp.gate.linear." in name:
+                name = name.replace("mlp.gate.linear.", "mlp.gate.")
+
+            # The fused experts apply their online SpinQuant rotation (R4) on
+            # the down-projection input data-free via Hadacore, so the per-expert
+            # Hadamard transform tensors stored in the checkpoint (e.g.
+            # `experts.<e>.down_proj.R4_input.weight`) are unused. The dense MLP
+            # down_proj keeps its own transform weight, handled by the linear path.
+            if "mlp.experts." in name and re.search(
+                r"\.R\d+_(input|output)\.weight$", name
+            ):
                 continue
 
             for param_name, shard_name, shard_id in stacked_params_mapping:
