@@ -52,6 +52,25 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 "quantization scheme but found multiple"
             )
 
+        # Detect online SpinQuant-style rotations (e.g. R4) for the experts and
+        # record them on the MoE config so the experts can apply them at runtime.
+        # This must happen even for quant-ignored layers, since the offline part
+        # of the rotation is fused into the (unquantized) weights regardless.
+        from vllm.model_executor.layers.quantization.compressed_tensors.transform.moe import (  # noqa: E501
+            get_moe_online_rotations,
+        )
+
+        rotations = get_moe_online_rotations(
+            layer_name, getattr(quant_config, "transform_config", None)
+        )
+        if rotations.w1_block is not None:
+            raise NotImplementedError(
+                "Online input rotation on the MoE gate/up projection is not "
+                "yet supported."
+            )
+        layer.moe_config.online_rotation_w1_block = rotations.w1_block
+        layer.moe_config.online_rotation_w2_block = rotations.w2_block
+
         if scheme_dict is None:  # ignored layer
             return UnquantizedFusedMoEMethod(layer.moe_config)
 

@@ -44,11 +44,17 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.group_size = 16
 
+        # When the checkpoint carries an online SpinQuant rotation (e.g. R4) on
+        # the down-projection input, restrict backend selection to kernels that
+        # can apply it between the two GEMMs.
+        require_online_rotation = self.moe.online_rotation_w2_block is not None
+
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
             activation_key=None if use_a16 else kNvfp4Dynamic,
+            require_online_rotation=require_online_rotation,
         )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(

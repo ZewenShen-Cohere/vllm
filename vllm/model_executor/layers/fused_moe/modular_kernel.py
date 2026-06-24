@@ -884,6 +884,18 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     ) -> None:
         apply_moe_activation(activation, output, input)
 
+        # Apply the online SpinQuant R4 rotation to the down-projection input
+        # (the activation output) before it is quantized for the second GEMM.
+        w2_block = self.moe_config.online_rotation_w2_block
+        if w2_block is not None:
+            from vllm.model_executor.layers.fused_moe.rotation import (
+                apply_moe_hadamard_rotation,
+            )
+
+            rotated = apply_moe_hadamard_rotation(output, w2_block)
+            if rotated.data_ptr() != output.data_ptr():
+                output.copy_(rotated)
+
     @abstractmethod
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
         raise NotImplementedError

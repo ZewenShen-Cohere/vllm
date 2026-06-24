@@ -1266,6 +1266,16 @@ class FusedMoEConfig:
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
 
+    # Online (runtime) SpinQuant-style Hadamard rotation block sizes applied to
+    # the experts' projection inputs. ``None`` means no rotation. ``w1`` rotates
+    # the gate/up-projection input (hidden states), ``w2`` rotates the
+    # down-projection input (intermediate activation, i.e. SpinQuant R4). Only
+    # backends that materialize the intermediate activation in Python (e.g.
+    # CUTLASS/emulation) can honor these; the oracle filters out fully-fused
+    # backends when a rotation is present.
+    online_rotation_w1_block: int | None = None
+    online_rotation_w2_block: int | None = None
+
     max_capture_size: int = 0
 
     def __post_init__(self):

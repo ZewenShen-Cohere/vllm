@@ -26,7 +26,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -558,7 +561,7 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        assert getattr(config, "tie_word_embeddings", True)
+        self.tie_word_embeddings = getattr(config, "tie_word_embeddings", True)
         self.unpadded_vocab_size = config.vocab_size
         self.quant_config = quant_config
         self.logits_scale = config.logit_scale
@@ -568,6 +571,16 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         self.model = Cohere2MoeModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # When embeddings are untied, the output projection is a separate
+        # weight. SpinQuant rotates `embed_tokens` (weight_output) and `lm_head`
+        # (weight_input) into different bases, so the two must not be tied.
+        if not self.tie_word_embeddings:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
@@ -592,8 +605,10 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        return self.logits_processor(self.model.embed_tokens, hidden_states)
+        head = self.model.embed_tokens if self.tie_word_embeddings else self.lm_head
+        return self.logits_processor(head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        skip_prefixes = ["lm_head."] if self.tie_word_embeddings else []
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)

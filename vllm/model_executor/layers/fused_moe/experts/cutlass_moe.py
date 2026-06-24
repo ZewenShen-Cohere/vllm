@@ -512,6 +512,7 @@ def run_cutlass_moe_fp4(
     e: int,
     device: torch.device,
     apply_router_weight_on_input: bool = False,
+    w2_input_rotation_block: int | None = None,
 ) -> None:
     """
     MoE implementation for FP4 Inputs
@@ -633,7 +634,7 @@ def run_cutlass_moe_fp4(
         blockscale_offsets[:-1],
     )
     del rep_a_fp4, rep_a_blockscale
-    if activation == MoEActivation.SILU:
+    if activation == MoEActivation.SILU and w2_input_rotation_block is None:
         # Fused SiLU+Mul+NVFP4 quantization
         # Note: c2 workspace is no longer needed since SiLU is fused with quantization.
         # c3 reuses workspace13 after c1 is consumed.
@@ -642,6 +643,17 @@ def run_cutlass_moe_fp4(
         )
     else:
         apply_moe_activation(activation, c2, c1)
+        if w2_input_rotation_block is not None:
+            # Online SpinQuant R4 rotation on the down-projection input. Done
+            # separately from the fused SiLU+quant path above so the rotation
+            # lands between the activation and NVFP4 quantization.
+            from vllm.model_executor.layers.fused_moe.rotation import (
+                apply_moe_hadamard_rotation,
+            )
+
+            rotated = apply_moe_hadamard_rotation(c2, w2_input_rotation_block)
+            if rotated.data_ptr() != c2.data_ptr():
+                c2.copy_(rotated)
         int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
             c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk
         )
@@ -803,6 +815,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
             e=e,
             device=hidden_states.device,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            w2_input_rotation_block=self.moe_config.online_rotation_w2_block,
         )
 
 

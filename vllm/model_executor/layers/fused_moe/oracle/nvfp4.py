@@ -57,6 +57,15 @@ FLASHINFER_NVFP4_MOE_BACKENDS = [
     NvFp4MoeBackend.FLASHINFER_B12X,
 ]
 
+# Backends that materialize the intermediate (down-projection input) activation
+# in Python and can therefore apply an online SpinQuant-style rotation (e.g. R4)
+# between the two GEMMs. Fully-fused backends are excluded.
+NVFP4_MOE_BACKENDS_WITH_ONLINE_ROTATION = [
+    NvFp4MoeBackend.VLLM_CUTLASS,
+    NvFp4MoeBackend.MARLIN,
+    NvFp4MoeBackend.EMULATION,
+]
+
 fi_2_vllm_backend_map: dict[FlashinferMoeBackend, NvFp4MoeBackend] = {
     FlashinferMoeBackend.CUTLASS: NvFp4MoeBackend.FLASHINFER_CUTLASS,
     FlashinferMoeBackend.TENSORRT_LLM: NvFp4MoeBackend.FLASHINFER_TRTLLM,
@@ -161,10 +170,17 @@ def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
+    require_online_rotation: bool = False,
 ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
     """
     Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
+
+    Args:
+        require_online_rotation: When True, restrict selection to backends that
+            can apply an online SpinQuant-style rotation (e.g. R4) on the
+            down-projection input. Fully-fused backends are excluded and an
+            incompatible explicit ``moe_backend`` raises.
     """
 
     # NOTE: the kernels are selected in the following order.
@@ -188,6 +204,13 @@ def select_nvfp4_moe_backend(
     if config.swiglu_limit is not None:
         AVAILABLE_BACKENDS = [
             b for b in AVAILABLE_BACKENDS if b in NVFP4_BACKENDS_WITH_CLAMP
+        ]
+
+    if require_online_rotation:
+        AVAILABLE_BACKENDS = [
+            b
+            for b in AVAILABLE_BACKENDS
+            if b in NVFP4_MOE_BACKENDS_WITH_ONLINE_ROTATION
         ]
 
     use_batched = config.moe_parallel_config.use_batched_activation_format
@@ -237,6 +260,16 @@ def select_nvfp4_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_nvfp4_backend(runner_backend)
+        if (
+            require_online_rotation
+            and requested_backend not in NVFP4_MOE_BACKENDS_WITH_ONLINE_ROTATION
+        ):
+            supported = [b.value for b in NVFP4_MOE_BACKENDS_WITH_ONLINE_ROTATION]
+            raise ValueError(
+                f"moe_backend={runner_backend!r} does not support online "
+                "SpinQuant rotations (e.g. R4) on the MoE down-projection "
+                f"input. Use one of {supported}."
+            )
         # For batched activation format, use batched variant if available.
         if (
             activation_format == mk.FusedMoEActivationFormat.BatchedExperts
@@ -257,7 +290,7 @@ def select_nvfp4_moe_backend(
             requested_backend, config, weight_key, activation_key, activation_format
         )
 
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
+    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4") and not require_online_rotation:
         if not envs.VLLM_USE_FLASHINFER_MOE_FP4:
             # If the user rejects FlashInfer remove those backends.
             for b in FLASHINFER_NVFP4_MOE_BACKENDS:
